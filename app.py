@@ -1,6 +1,13 @@
-from fastapi import FastAPI, Header, HTTPException, Response, Query
+from fastapi import (
+    FastAPI,
+    Header,
+    Response,
+    Request,
+    HTTPException,
+    Query,
+    Body,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import uuid
 import time
 import base64
@@ -20,9 +27,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------------------
+# -----------------------------
 # In-memory stores
-# ----------------------------
+# -----------------------------
 
 idempotency_store = {}
 
@@ -31,23 +38,18 @@ rate_limit_store = {}
 catalog = [
     {
         "id": i,
-        "item": f"Item {i}"
+        "item": f"Item {i}",
     }
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
 
-class Order(BaseModel):
-    product: str
-    quantity: int
-
-
-# ----------------------------
-# Rate limiting middleware
-# ----------------------------
+# -----------------------------
+# Rate limiting
+# -----------------------------
 
 @app.middleware("http")
-async def rate_limit(request, call_next):
+async def rate_limit(request: Request, call_next):
 
     client = request.headers.get("X-Client-Id", "anonymous")
 
@@ -63,12 +65,12 @@ async def rate_limit(request, call_next):
 
     if len(timestamps) >= RATE_LIMIT:
 
-        retry = WINDOW - (now - timestamps[0])
+        retry = max(1, int(WINDOW - (now - timestamps[0])) + 1)
 
         return Response(
             status_code=429,
             headers={
-                "Retry-After": str(int(retry) + 1)
+                "Retry-After": str(retry)
             },
         )
 
@@ -79,9 +81,9 @@ async def rate_limit(request, call_next):
     return await call_next(request)
 
 
-# ----------------------------
+# -----------------------------
 # Ping
-# ----------------------------
+# -----------------------------
 
 @app.get("/ping")
 def ping():
@@ -92,16 +94,22 @@ def ping():
     }
 
 
-# ----------------------------
+# -----------------------------
 # POST /orders
-# ----------------------------
+# -----------------------------
 
 @app.post("/orders", status_code=201)
-def create_order(
-    order: Order,
+async def create_order(
     response: Response,
-    idempotency_key: str = Header(...),
+    request: Request,
+    idempotency_key: str | None = Header(default=None),
 ):
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Idempotency-Key",
+        )
 
     if idempotency_key in idempotency_store:
 
@@ -109,34 +117,44 @@ def create_order(
 
         return idempotency_store[idempotency_key]
 
-    new_order = {
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        body = {}
+
+    order = {
         "id": str(uuid.uuid4()),
-        "product": order.product,
-        "quantity": order.quantity,
+        **body,
     }
 
-    idempotency_store[idempotency_key] = new_order
+    idempotency_store[idempotency_key] = order
 
-    return new_order
+    return order
 
 
-# ----------------------------
-# Pagination
-# ----------------------------
+# -----------------------------
+# GET /orders
+# -----------------------------
 
 @app.get("/orders")
 def list_orders(
-    limit: int = Query(10),
-    cursor: str | None = None,
+    limit: int = Query(default=10),
+    cursor: str | None = Query(default=None),
 ):
 
     start = 0
 
     if cursor:
 
-        start = int(
-            base64.b64decode(cursor).decode()
-        )
+        try:
+            start = int(
+                base64.b64decode(cursor.encode()).decode()
+            )
+        except Exception:
+            start = 0
 
     end = min(start + limit, TOTAL_ORDERS)
 
