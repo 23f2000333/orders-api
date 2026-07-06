@@ -27,7 +27,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Retry-After"],
+    expose_headers=["Retry-After", "X-RateLimit-Remaining"],
 )
 
 # -----------------------------
@@ -80,7 +80,6 @@ async def rate_limit(request: Request, call_next):
         )
     
         response.headers["Retry-After"] = str(retry_after)
-        response.headers["Access-Control-Allow-Origin"] = "*"
     
         return response
 
