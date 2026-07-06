@@ -27,6 +27,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
 # -----------------------------
@@ -72,15 +73,16 @@ async def rate_limit(request: Request, call_next):
             1,
             math.ceil(WINDOW - (now - timestamps[0]))
         )
-
-        return JSONResponse(
+    
+        response = JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={
-                "Retry-After": str(retry_after),
-                "Access-Control-Allow-Origin": "*",
-            },
         )
+    
+        response.headers["Retry-After"] = str(retry_after)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    
+        return response
 
     timestamps.append(now)
 
