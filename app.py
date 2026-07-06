@@ -1,17 +1,10 @@
-from fastapi import (
-    FastAPI,
-    Header,
-    Response,
-    Request,
-    HTTPException,
-    Query,
-    Body,
-)
+from fastapi import FastAPI, Request, Response, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import uuid
 import time
+import math
 import base64
-from fastapi.responses import JSONResponse
 
 EMAIL = "23f2000333@ds.study.iitm.ac.in"
 
@@ -24,47 +17,54 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Retry-After", "X-RateLimit-Remaining"],
+    expose_headers=["Retry-After"],
 )
 
 # -----------------------------
-# In-memory stores
+# Storage
 # -----------------------------
 
 idempotency_store = {}
-
 rate_limit_store = {}
 
 catalog = [
     {
         "id": i,
-        "item": f"Item {i}",
+        "item": f"Item {i}"
     }
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-
 # -----------------------------
-# Rate limiting
+# Rate Limiter
 # -----------------------------
-
-from fastapi.responses import JSONResponse
-import math
-import time
 
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
-    client = request.headers.get("X-Client-Id", "anonymous")
+    # Never rate limit CORS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Never rate limit ping
+    if request.url.path == "/ping":
+        return await call_next(request)
+
+    # Only rate limit /orders endpoints
+    if not request.url.path.startswith("/orders"):
+        return await call_next(request)
+
+    client = request.headers.get("X-Client-Id")
+
+    if not client:
+        client = request.client.host
 
     now = time.time()
 
     timestamps = rate_limit_store.get(client, [])
 
-    # keep only requests in the last 10 seconds
     timestamps = [t for t in timestamps if now - t < WINDOW]
 
     if len(timestamps) >= RATE_LIMIT:
@@ -73,14 +73,14 @@ async def rate_limit(request: Request, call_next):
             1,
             math.ceil(WINDOW - (now - timestamps[0]))
         )
-    
+
         response = JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
         )
-    
+
         response.headers["Retry-After"] = str(retry_after)
-    
+
         return response
 
     timestamps.append(now)
@@ -89,28 +89,25 @@ async def rate_limit(request: Request, call_next):
 
     return await call_next(request)
 
-
 # -----------------------------
 # Ping
 # -----------------------------
 
 @app.get("/ping")
 def ping():
-
     return {
         "status": "ok",
         "email": EMAIL,
     }
 
-
 # -----------------------------
-# POST /orders
+# Idempotent POST
 # -----------------------------
 
 @app.post("/orders", status_code=201)
 async def create_order(
-    response: Response,
     request: Request,
+    response: Response,
     idempotency_key: str | None = Header(default=None),
 ):
 
@@ -143,25 +140,23 @@ async def create_order(
 
     return order
 
-
 # -----------------------------
-# GET /orders
+# Pagination
 # -----------------------------
 
 @app.get("/orders")
 def list_orders(
-    limit: int = Query(default=10),
+    limit: int = Query(10),
     cursor: str | None = Query(default=None),
 ):
+
+    limit = max(1, limit)
 
     start = 0
 
     if cursor:
-
         try:
-            start = int(
-                base64.b64decode(cursor.encode()).decode()
-            )
+            start = int(base64.b64decode(cursor).decode())
         except Exception:
             start = 0
 
@@ -172,10 +167,7 @@ def list_orders(
     next_cursor = None
 
     if end < TOTAL_ORDERS:
-
-        next_cursor = base64.b64encode(
-            str(end).encode()
-        ).decode()
+        next_cursor = base64.b64encode(str(end).encode()).decode()
 
     return {
         "items": items,
