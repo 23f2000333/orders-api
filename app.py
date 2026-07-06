@@ -52,14 +52,14 @@ async def rate_limit(request: Request, call_next):
     if request.url.path == "/ping":
         return await call_next(request)
 
-    # Only rate limit /orders endpoints
-    if not request.url.path.startswith("/orders"):
+    # Only rate-limit GET /orders (pagination endpoint)
+    if not (
+        request.method == "GET"
+        and request.url.path == "/orders"
+    ):
         return await call_next(request)
 
-    client = request.headers.get("X-Client-Id")
-
-    if not client:
-        client = request.client.host
+    client = request.headers.get("X-Client-Id", "anonymous")
 
     now = time.time()
 
@@ -79,7 +79,7 @@ async def rate_limit(request: Request, call_next):
             content={"detail": "Rate limit exceeded"},
         )
 
-        response.headers["Retry-After"] = str(retry_after)
+        response.headers.append("Retry-After", str(retry_after))
 
         return response
 
