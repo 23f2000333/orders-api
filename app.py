@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import time
 import base64
+from fastapi.responses import JSONResponse
 
 EMAIL = "23f2000333@ds.study.iitm.ac.in"
 
@@ -68,10 +69,12 @@ async def rate_limit(request: Request, call_next):
 
         retry = max(1, int(WINDOW - (now - timestamps[0])) + 1)
 
-        return Response(
+        return JSONResponse(
             status_code=429,
+            content={"detail": "Rate limit exceeded"},
             headers={
-                "Retry-After": str(retry)
+                "Retry-After": str(retry),
+                "Access-Control-Allow-Origin": "*",
             },
         )
 
