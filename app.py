@@ -6,13 +6,13 @@ import time
 import math
 import base64
 
+app = FastAPI()
+
 EMAIL = "23f2000333@ds.study.iitm.ac.in"
 
-TOTAL_ORDERS = 49
+TOTAL = 49
 RATE_LIMIT = 16
 WINDOW = 10
-
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,76 +22,22 @@ app.add_middleware(
     expose_headers=["Retry-After"],
 )
 
-# -----------------------------
-# Storage
-# -----------------------------
+# -----------------------
+# In-memory stores
+# -----------------------
 
-idempotency_store = {}
-rate_limit_store = {}
+orders_created = {}
+
+client_buckets = {}
 
 catalog = [
     {
         "id": i,
-        "item": f"Item {i}"
+        "name": f"Order {i}"
     }
-    for i in range(1, TOTAL_ORDERS + 1)
+    for i in range(1, TOTAL + 1)
 ]
 
-# -----------------------------
-# Rate Limiter
-# -----------------------------
-
-@app.middleware("http")
-async def rate_limit(request: Request, call_next):
-
-    # Never rate limit CORS preflight
-    if request.method == "OPTIONS":
-        return await call_next(request)
-
-    # Never rate limit ping
-    if request.url.path == "/ping":
-        return await call_next(request)
-
-    # Only rate-limit GET /orders (pagination endpoint)
-    if not (
-        request.method == "GET"
-        and request.url.path == "/orders"
-    ):
-        return await call_next(request)
-
-    client = request.headers.get("X-Client-Id", "anonymous")
-
-    now = time.time()
-
-    timestamps = rate_limit_store.get(client, [])
-
-    timestamps = [t for t in timestamps if now - t < WINDOW]
-
-    if len(timestamps) >= RATE_LIMIT:
-
-        retry_after = max(
-            1,
-            math.ceil(WINDOW - (now - timestamps[0]))
-        )
-
-        response = JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded"},
-        )
-
-        response.headers.append("Retry-After", str(retry_after))
-
-        return response
-
-    timestamps.append(now)
-
-    rate_limit_store[client] = timestamps
-
-    return await call_next(request)
-
-# -----------------------------
-# Ping
-# -----------------------------
 
 @app.get("/ping")
 def ping():
@@ -100,74 +46,114 @@ def ping():
         "email": EMAIL,
     }
 
-# -----------------------------
-# Idempotent POST
-# -----------------------------
 
-@app.post("/orders", status_code=201)
+@app.post("/orders")
 async def create_order(
     request: Request,
     response: Response,
     idempotency_key: str | None = Header(default=None),
 ):
 
-    if not idempotency_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing Idempotency-Key",
-        )
+    if idempotency_key is None:
+        raise HTTPException(400, "Missing Idempotency-Key")
 
-    if idempotency_key in idempotency_store:
+    if idempotency_key in orders_created:
 
         response.status_code = 200
 
-        return idempotency_store[idempotency_key]
+        return orders_created[idempotency_key]
 
     try:
-        body = await request.json()
+        payload = await request.json()
     except Exception:
-        body = {}
+        payload = {}
 
-    if not isinstance(body, dict):
-        body = {}
+    if not isinstance(payload, dict):
+        payload = {}
 
     order = {
         "id": str(uuid.uuid4()),
-        **body,
+        **payload,
     }
 
-    idempotency_store[idempotency_key] = order
+    orders_created[idempotency_key] = order
+
+    response.status_code = 201
 
     return order
 
-# -----------------------------
-# Pagination
-# -----------------------------
 
 @app.get("/orders")
 def list_orders(
+    request: Request,
     limit: int = Query(10),
-    cursor: str | None = Query(default=None),
+    cursor: str | None = Query(None),
 ):
 
-    limit = max(1, limit)
+    # --------------------
+    # Rate limit ONLY GET /orders
+    # --------------------
+
+    client = request.headers.get("X-Client-Id", "anonymous")
+
+    now = time.time()
+
+    bucket = client_buckets.get(client, [])
+
+    bucket = [
+        t
+        for t in bucket
+        if now - t < WINDOW
+    ]
+
+    if len(bucket) >= RATE_LIMIT:
+
+        retry = max(
+            1,
+            math.ceil(WINDOW - (now - bucket[0]))
+        )
+
+        resp = JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded"
+            },
+        )
+
+        resp.headers["Retry-After"] = str(retry)
+
+        return resp
+
+    bucket.append(now)
+
+    client_buckets[client] = bucket
+
+    # --------------------
+    # Pagination
+    # --------------------
 
     start = 0
 
     if cursor:
+
         try:
-            start = int(base64.b64decode(cursor).decode())
+            start = int(
+                base64.b64decode(cursor).decode()
+            )
         except Exception:
             start = 0
 
-    end = min(start + limit, TOTAL_ORDERS)
+    end = min(start + limit, TOTAL)
 
     items = catalog[start:end]
 
     next_cursor = None
 
-    if end < TOTAL_ORDERS:
-        next_cursor = base64.b64encode(str(end).encode()).decode()
+    if end < TOTAL:
+
+        next_cursor = base64.b64encode(
+            str(end).encode()
+        ).decode()
 
     return {
         "items": items,
