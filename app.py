@@ -50,6 +50,10 @@ catalog = [
 # Rate limiting
 # -----------------------------
 
+from fastapi.responses import JSONResponse
+import math
+import time
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
@@ -59,21 +63,21 @@ async def rate_limit(request: Request, call_next):
 
     timestamps = rate_limit_store.get(client, [])
 
-    timestamps = [
-        t
-        for t in timestamps
-        if now - t < WINDOW
-    ]
+    # keep only requests in the last 10 seconds
+    timestamps = [t for t in timestamps if now - t < WINDOW]
 
     if len(timestamps) >= RATE_LIMIT:
 
-        retry = max(1, int(WINDOW - (now - timestamps[0])) + 1)
+        retry_after = max(
+            1,
+            math.ceil(WINDOW - (now - timestamps[0]))
+        )
 
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
             headers={
-                "Retry-After": str(retry),
+                "Retry-After": str(retry_after),
                 "Access-Control-Allow-Origin": "*",
             },
         )
